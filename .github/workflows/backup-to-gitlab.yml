@@ -1,0 +1,94 @@
+name: Backup to GitLab
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitlab-backup-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Copy this repository to its matching GitLab project
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$GITLAB_TOKEN" ]]; then
+            echo "::error::Add the GITLAB_TOKEN secret in THIS GitHub repository."
+            exit 1
+          fi
+          if [[ "${GITHUB_REPOSITORY_OWNER,,}" != "aaziko1market1" && \
+                "${GITHUB_REPOSITORY_OWNER,,}" != "reactjsaaziko" ]]; then
+            echo "::error::This workflow is only for Aaziko1Market1 or reactjsaaziko."
+            exit 1
+          fi
+
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          SOURCE_URL="https://github.com/${GITHUB_REPOSITORY}.git"
+          DEST_URL="https://gitlab.com/aaziko-backup-letest/${REPO_NAME}.git"
+          echo "Source: $SOURCE_URL"
+          echo "Destination: $DEST_URL"
+
+          umask 077
+          trap 'rm -f "$HOME/.netrc"' EXIT
+          cat > "$HOME/.netrc" <<EOF
+          machine github.com
+          login x-access-token
+          password $GH_TOKEN
+          machine gitlab.com
+          login oauth2
+          password $GITLAB_TOKEN
+          EOF
+
+          # Stop if the matching GitLab project cannot be accessed.
+          git ls-remote --refs "$DEST_URL" > /dev/null
+          git clone --bare "$SOURCE_URL" backup.git
+          cd backup.git
+          git remote add gitlab "$DEST_URL"
+
+          # Preview: do not force changes or delete old GitLab branches.
+          REFS=('refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*')
+          git push --dry-run --atomic gitlab "${REFS[@]}"
+
+          # Transfer Git LFS files, when present.
+          git lfs fetch --all origin
+          git -c lfs.url="${DEST_URL}/info/lfs" \
+              -c lfs.pushurl="${DEST_URL}/info/lfs" \
+              lfs push --all gitlab
+
+          # Update branches/tags together and request skipping push CI.
+          git push --atomic -o ci.skip -o integrations.skip_ci \
+            gitlab "${REFS[@]}"
+
+          # Verify every source branch and tag against GitLab.
+          git for-each-ref --format='%(objectname) %(refname)' \
+            refs/heads refs/tags > expected.txt
+          git ls-remote --refs gitlab | \
+            awk '{print $1 " " $2}' > actual.txt
+          test -s expected.txt
+          while IFS= read -r ref; do
+            if ! grep -Fxq "$ref" actual.txt; then
+              echo "::error::Branch or tag verification failed: $ref"
+              exit 1
+            fi
+          done < expected.txt
+
+          {
+            echo "## Backup completed: $REPO_NAME"
+            echo "GitHub source: $GITHUB_REPOSITORY"
+            echo "GitLab destination: aaziko-backup-letest/$REPO_NAME"
+            echo "All copied GitHub branches and tags match GitLab."
+            echo "The Git LFS transfer completed."
+          } >> "$GITHUB_STEP_SUMMARY"
