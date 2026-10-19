@@ -51,8 +51,15 @@ let before = (process.env.BEFORE_SHA || "").trim();
 const after = (process.env.AFTER_SHA || "").trim() || "HEAD";
 const baseBranch = (process.env.BASE_BRANCH || "").trim() || "main"; // repo default branch (new branches are compared to it)
 const branch = (process.env.BRANCH || "").trim() || baseBranch;
+// History back-fill support (used once to write the work done before this system existed):
+//   HISTORY=1          -> wording "on this day" instead of "this push"
+//   ENTRY_ONLY=<file>  -> write just the entry markdown to <file>, touch nothing else
+//   BUILD_ONLY=1       -> only rebuild CHANGELOG.docx/.pdf from the existing source
+const HISTORY = process.env.HISTORY === "1";
+const ENTRY_ONLY = (process.env.ENTRY_ONLY || "").trim();
+if (process.env.BUILD_ONLY === "1") { buildDocs(); process.exit(0); }
 
-if (!before || before === ZERO || git(["cat-file", "-t", before]) !== "commit") {
+if (!before || before === ZERO || !["commit", "tree"].includes(git(["cat-file", "-t", before]))) {
   // New branch (or unknown "before"): document only what is not already on the default branch.
   const base = branch !== baseBranch ? git(["merge-base", `origin/${baseBranch}`, after]) : "";
   if (base && base === git(["rev-parse", after])) {
@@ -260,7 +267,7 @@ for (const f of files) { const d = f.path.includes("/") ? f.path.split("/").slic
 const topAreas = Object.entries(areas).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([d, n]) => `${code(d)} (${n})`);
 
 const overview =
-`This push to branch ${code(branch)} changed **${files.length} file(s)**: ${count("new")} new, ${count("modified")} modified, ${count("removed")} removed (+${totalAdd} / −${totalDel} lines).
+`${HISTORY ? `On this day, branch ${code(branch)} received changes to` : `This push to branch ${code(branch)} changed`} **${files.length} file(s)**: ${count("new")} new, ${count("modified")} modified, ${count("removed")} removed (+${totalAdd} / −${totalDel} lines).
 
 Main areas touched: ${topAreas.join(", ")}.`;
 
@@ -271,7 +278,7 @@ const part = (title, key, otherTitle) => {
 };
 
 const entry =
-`## ${dateOnly} ${timeOnly} — branch \`${branch}\`
+`## ${HISTORY ? `${dateOnly} — branch \`${branch}\` (history)` : `${dateOnly} ${timeOnly} — branch \`${branch}\``}
 
 ### Overview
 
@@ -283,6 +290,12 @@ ${(impact.length ? [...new Set(impact)] : ["No other files depend on the changed
 
 ---
 `;
+
+if (ENTRY_ONLY) {
+  writeFileSync(ENTRY_ONLY, entry);
+  console.log(`[changelog] entry for ${dateOnly} (${files.length} file(s)) -> ${ENTRY_ONLY}`);
+  process.exit(0);
+}
 
 // ---------------------------------------------------------------- update source (keeps all history)
 const HEADER_NOTE = "> Auto-generated on every push, to any branch. Newest entry first. Old entries are never removed.";
@@ -306,7 +319,30 @@ if (!doc.includes(MARKER)) doc = doc.replace(/\n\n/, `\n\n${MARKER}\n`);
 mkdirSync(dirname(SOURCE), { recursive: true });
 writeFileSync(SOURCE, doc.replace(MARKER, `${MARKER}\n\n${entry}`));
 console.log(`[changelog] documented ${files.length} file(s) on ${branch} ${dateOnly} ${timeOnly} -> ${SOURCE}`);
+buildDocs();
 
+// ---------------------------------------------------------------- keep only the latest version on the changelog branch
+// The PDF is rebuilt in full on every push; keeping every old version would grow the
+// repo by megabytes per push. The document itself holds all history, so the branch
+// only needs its latest state: commit it with no parent and force-push (like gh-pages).
+// Only inside the GitHub Action (serialised by its concurrency group).
+const docBranch = (process.env.DOC_BRANCH || "").trim();
+if (process.env.GITHUB_ACTIONS === "true" && docBranch && docBranch !== baseBranch) {
+  const id = { ...process.env, GIT_AUTHOR_NAME: "aaziko-flow bot", GIT_AUTHOR_EMAIL: "github-actions[bot]@users.noreply.github.com",
+    GIT_COMMITTER_NAME: "aaziko-flow bot", GIT_COMMITTER_EMAIL: "github-actions[bot]@users.noreply.github.com" };
+  try {
+    execFileSync("git", ["add", DOCX, PDF, SOURCE], { stdio: "ignore" });
+    const tree = git(["write-tree"]);
+    const c = execFileSync("git", ["commit-tree", tree, "-m", `docs: document push to ${branch} [skip changelog]`], { encoding: "utf8", env: id }).trim();
+    execFileSync("git", ["push", "-q", "--force", "origin", `${c}:refs/heads/${docBranch}`], { stdio: "inherit" });
+    execFileSync("git", ["reset", "-q", "--soft", c]); // so the workflow's own commit step finds nothing left to do
+    console.log(`[changelog] saved latest document to '${docBranch}' (${c.slice(0, 7)}, single commit)`);
+  } catch (e) {
+    console.error(`[changelog] single-commit save failed, the workflow will commit normally: ${e?.message || e}`);
+  }
+}
+
+function buildDocs() {
 // ---------------------------------------------------------------- build the Word .docx
 try {
   sh(`pandoc ${JSON.stringify(SOURCE)} -o ${JSON.stringify(DOCX)} --toc --toc-depth=2`);
@@ -327,19 +363,20 @@ h1{font-size:24px;border-bottom:2px solid #333;padding-bottom:6px}
 h2{font-size:19px;margin-top:32px;border-bottom:1px solid #ccc;padding-bottom:4px}
 h3{font-size:15px;margin-top:18px}
 h4{font-size:13px;margin:14px 0 2px}
-code{font-size:12px;background:#f3f3f3;padding:1px 4px;border-radius:3px}
+code{font-family:"DejaVu Sans Mono",monospace;font-size:12px;color:#7a2e0e}
 blockquote{color:#555;border-left:3px solid #ccc;margin:0;padding-left:12px}
 hr{border:0;border-top:1px solid #ddd;margin:24px 0}
-nav#TOC{background:#f7f7f7;padding:8px 16px;border-radius:4px}
+nav#TOC{background:#f7f7f7;padding:8px 16px}
 header#title-block-header{display:none}`);
   sh(`pandoc ${JSON.stringify(SOURCE)} -s --toc --toc-depth=2 -c ${JSON.stringify(tmpCss.split("/").pop())} -o ${JSON.stringify(tmpHtml)}`);
   const chrome = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
     .find((b) => shSafe(`command -v ${b}`));
   if (!chrome) throw new Error("no Chrome/Chromium found");
-  sh(`${chrome} --headless=new --no-sandbox --disable-gpu --no-pdf-header-footer --print-to-pdf=${JSON.stringify(PDF)} ${JSON.stringify("file://" + process.cwd() + "/" + tmpHtml)}`);
+  sh(`${chrome} --headless=new --no-sandbox --disable-gpu --no-pdf-header-footer --disable-pdf-tagging --print-to-pdf=${JSON.stringify(PDF)} ${JSON.stringify("file://" + process.cwd() + "/" + tmpHtml)}`);
   shSafe(`rm -f ${JSON.stringify(tmpHtml)} ${JSON.stringify(tmpCss)}`);
   console.log(`[changelog] built ${PDF}`);
 } catch (e) {
   console.error(`[changelog] PDF build failed: ${e?.message || e}`);
   process.exitCode = 0;
+}
 }
