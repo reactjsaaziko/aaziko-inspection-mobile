@@ -1,0 +1,110 @@
+# =============================================================================
+# Aaziko Changelog  —  documents EVERY push (any branch) in one Word + PDF
+# document saved on the dedicated `changelog` branch. Runs on GitHub for ANY user.
+#   1. figures out the files + diff the push brought in
+#   2. .aaziko-flow/changelog.mjs documents every changed file straight from
+#      the code (NO AI): functions/routes/imports/packages added, removed,
+#      changed, plus the impact on other files. History kept in
+#      .aaziko-flow/changelog-source.md
+#   3. pandoc builds CHANGELOG.docx; headless Chrome builds CHANGELOG.pdf
+#      (GitHub can show the PDF in the browser; it cannot show .docx)
+#   4. commits those files to the `changelog` branch with [skip changelog]
+#   Each entry says which branch was pushed.
+#
+# Why a separate `changelog` branch: main / prod are deployed by Jenkins,
+# Coolify and deploy.yml. Writing the document there would redeploy
+# production on every push. The `changelog` branch holds ONLY the document.
+#
+# Read it at: https://github.com/<owner>/<repo>/blob/changelog/CHANGELOG.pdf
+#
+# GitHub runs the copy of this file that is on the PUSHED branch, so it must
+# exist on every branch people push to (new branches inherit it).
+# No secrets or keys needed.
+# =============================================================================
+name: Aaziko Changelog
+
+on:
+  push:
+    branches: ['**']
+    paths-ignore:                         # the bot's own push changes only these
+      - CHANGELOG.docx
+      - CHANGELOG.pdf
+      - .aaziko-flow/changelog-source.md
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aaziko-changelog                 # one run at a time: all write to one branch
+  cancel-in-progress: false
+
+env:
+  BASE_BRANCH: ${{ github.event.repository.default_branch }}
+  DOC_BRANCH: changelog
+
+jobs:
+  changelog:
+    if: >-
+      github.actor != 'github-actions[bot]' &&
+      github.ref_name != 'changelog' &&
+      !contains(github.event.head_commit.message, '[skip changelog]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Fetch all branches
+        run: git fetch --no-tags origin "+refs/heads/*:refs/remotes/origin/*"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Ensure pandoc is available
+        run: pandoc --version || (sudo apt-get update && sudo apt-get install -y pandoc)
+
+      - name: Prepare generator
+        env:
+          AFTER_SHA: ${{ github.event.after }}
+        run: |
+          # use the generator from the pushed commit if it has one, else the default branch's
+          git show "$AFTER_SHA:.aaziko-flow/changelog.mjs" > /tmp/changelog.mjs 2>/dev/null \
+            || cp .aaziko-flow/changelog.mjs /tmp/changelog.mjs
+
+      - name: Switch to the changelog branch
+        run: |
+          if git rev-parse --verify -q "origin/${DOC_BRANCH}" >/dev/null; then
+            git checkout -q -B "${DOC_BRANCH}" "origin/${DOC_BRANCH}"
+          else
+            git checkout -q --orphan "${DOC_BRANCH}"
+            git rm -rq --cached .
+            git clean -fdxq
+          fi
+
+      - name: Generate change documentation (.docx + .pdf)
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+          BRANCH: ${{ github.ref_name }}
+        run: node /tmp/changelog.mjs
+
+      - name: Commit & push the document to the changelog branch
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          git add CHANGELOG.docx CHANGELOG.pdf .aaziko-flow/changelog-source.md 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No documentation changes to commit."
+            exit 0
+          fi
+          git config user.name  "aaziko-flow bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "docs: document push to ${BRANCH} [skip changelog]"
+          for i in 1 2 3; do
+            git push origin "HEAD:${DOC_BRANCH}" && exit 0
+            echo "${DOC_BRANCH} moved, rebasing and retrying ($i)"
+            git pull --rebase origin "${DOC_BRANCH}"
+          done
+          exit 1
