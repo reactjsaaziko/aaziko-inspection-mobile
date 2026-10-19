@@ -137,17 +137,17 @@ function analyze(f) {
   };
 }
 
-function packageDiff(path) {
+function packageDiff(path) { // plain sentences about external libraries
   const read = (rev) => { try { return JSON.parse(git(["show", `${rev}:${path}`]) || "{}"); } catch { return {}; } };
   const a = read(before), b = read(after), out = [];
   for (const sec of ["dependencies", "devDependencies"]) {
-    const x = a[sec] || {}, y = b[sec] || {};
-    for (const k of Object.keys(y)) if (!(k in x)) out.push(`added package ${code(k)} ${y[k]}`);
-    for (const k of Object.keys(x)) if (!(k in y)) out.push(`removed package ${code(k)}`);
-    for (const k of Object.keys(y)) if (k in x && x[k] !== y[k]) out.push(`upgraded ${code(k)} ${x[k]} → ${y[k]}`);
+    const x = a[sec] || {}, y = b[sec] || {}, kind = sec === "devDependencies" ? "development tool" : "external library";
+    for (const k of Object.keys(y)) if (!(k in x)) out.push(`The ${kind} ${k} was added (version ${y[k]}).`);
+    for (const k of Object.keys(x)) if (!(k in y)) out.push(`The ${kind} ${k} was removed.`);
+    for (const k of Object.keys(y)) if (k in x && x[k] !== y[k]) out.push(`The ${kind} ${k} was upgraded from version ${x[k]} to ${y[k]}.`);
   }
   const sx = a.scripts || {}, sy = b.scripts || {};
-  for (const k of Object.keys(sy)) if (sx[k] !== sy[k]) out.push(`${k in sx ? "changed" : "added"} npm script ${code(k)}`);
+  for (const k of Object.keys(sy)) if (sx[k] !== sy[k]) out.push(`The ${words(k).join(" ")} command of the project was ${k in sx ? "changed" : "added"}.`);
   return out;
 }
 
@@ -170,20 +170,111 @@ const usersOf = (name, exclude) =>
   git(["grep", "-l", "-w", "-F", name, after, "--", ...CODE_GLOBS]).split("\n").filter(Boolean)
     .map((l) => l.slice(after.length + 1)).filter((p) => p !== exclude);
 
-// ---- build the per-file documentation ---------------------------------------
-const lineInfo = (f) => (f.add === null ? "binary file" : f.status === "new" ? `${f.add} lines` : f.status === "removed" ? `${f.del} lines removed` : `+${f.add} / −${f.del} lines`);
-const isCode = (f) => CODE_EXT.test(f.path) || f.path.endsWith("package.json");
+// ---- plain-English wording: the document has ONLY sentences — no file names, paths, code names or links ----
+const ACR = { api: "API", apis: "APIs", pdf: "PDF", pdfs: "PDFs", url: "link", urls: "links", id: "ID", ids: "IDs", otp: "OTP", hs: "HS", rfq: "RFQ", rfqs: "RFQs",
+  lsq: "LSQ", ai: "AI", seo: "SEO", ui: "screen", csv: "CSV", html: "HTML", json: "JSON", jwt: "login token", sms: "SMS", gst: "GST", kyc: "KYC", crm: "CRM",
+  faq: "FAQ", faqs: "FAQs", nav: "navigation", btn: "button", img: "image", imgs: "images", msg: "message", msgs: "messages", qty: "quantity", cfg: "configuration",
+  config: "configuration", db: "database", req: "request", res: "response", i18n: "translations", dto: "data", ws: "live connection", usd: "USD", inr: "INR",
+  b2b: "B2B", cta: "call-to-action", mui: "MUI", en: "English", hi: "Hindi", gu: "Gujarati", ar: "Arabic", fr: "French", es: "Spanish",
+  vi: "Vietnamese", zh: "Chinese", js: "", ts: "", jsx: "", tsx: "", mjs: "", cjs: "" };
+const VERB = { handle: "handling of", on: "reaction to", use: "shared logic for", get: "getting", fetch: "loading", load: "loading", set: "setting", update: "updating",
+  create: "creating", add: "adding", delete: "deleting", remove: "removing", render: "display of", format: "formatting", fmt: "formatting", is: "the check for",
+  has: "the check for", can: "the check whether it can", should: "the decision whether to", validate: "validation of", build: "building", parse: "reading",
+  to: "conversion to", calc: "calculation of", calculate: "calculation of", compute: "calculation of", init: "setup of", toggle: "switching", open: "opening",
+  close: "closing", submit: "submitting", send: "sending", save: "saving", show: "showing", hide: "hiding", go: "going to", check: "checking", reset: "resetting",
+  apply: "applying", map: "mapping", normalize: "cleaning up", sanitize: "cleaning", verify: "verification of", generate: "generating", upload: "uploading",
+  download: "downloading", export: "exporting", import: "importing", sync: "syncing", process: "processing", select: "selecting", filter: "filtering",
+  sort: "sorting", search: "searching", scroll: "scrolling", resolve: "working out", ensure: "making sure of", assert: "checking", find: "finding", list: "listing",
+  read: "reading", write: "writing", track: "tracking", notify: "notifying", register: "registering" };
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const words = (s) => String(s).replace(/^[_$]+/, "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+  .replace(/[_\-.\s/@()[\]]+/g, " ").trim().toLowerCase().split(" ").filter(Boolean).map((w) => (w in ACR ? ACR[w] : w)).filter(Boolean);
+const human = (id) => {
+  const w = words(id);
+  const s = w.length > 1 && VERB[w[0]] ? `${VERB[w[0]]} ${w.slice(1).join(" ")}` : w.join(" ");
+  return s.replace(/\b(\w+) \1\b/g, "$1"); // "going to to slide" -> "going to slide"
+};
+const joinNat = (arr) => { const a = [...new Set(arr.filter(Boolean))]; return a.length <= 1 ? (a[0] || "") : `${a.slice(0, -1).join(", ")} and ${a[a.length - 1]}`; };
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const pl = (n, one, many) => (n === 1 ? one : many);
+const fmtDate = (d) => { const [y, m, day] = d.split("-").map(Number); return `${day} ${MONTHS[m - 1]} ${y}`; };
+const STRUCT_DIR = /^(src|app|lib|source|dist|server|client|java|kotlin|com|res|components?|utils?|helpers?|hooks?|store|api|routes?|controllers?|models?|middlewares?|configs?|__tests__|tests?|e2e|common|shared|services?)$/i;
+const GENERIC_FILE = new Set(["index", "page", "route", "routes", "layout", "main", "app", "server", "default", "mod", "init", "__init__"]);
+const KINDS = [
+  [/(^|\/)(__tests__|tests?|e2e)\/|\.(test|spec)\.[^.]+$/, "automated test set"],
+  [/(^|\/)(i18n|locales?|translations?)\//, "translation set"],
+  [/(^|\/)routes?\/|\.routes?\.[^.]+$|Route\.[jt]sx?$/, "routing"],
+  [/(^|\/)controllers?\/|\.controller\.[^.]+$/, "request handling"],
+  [/(^|\/)models?\/|\.model\.[^.]+$|\.schema\.[^.]+$/, "data model"],
+  [/(^|\/)middlewares?\/|\.middleware\.[^.]+$/, "request checks"],
+  [/(^|\/)(store|redux|slices?)\/|Api\.[jt]sx?$|(^|\/)api\//, "data loading"],
+  [/(^|\/)hooks?\/|\/use[A-Z][^/]*\.[jt]sx?$/, "shared logic"],
+  [/(^|\/)(utils?|helpers?|common)\//, "helper"],
+  [/(^|\/)configs?\/|\.config\.[^.]+$/, "configuration"],
+  [/(^|\/)components?\//, "component"],
+  [/(^|\/)services?\/|\.service\.[^.]+$/, "service logic"],
+  [/\.(jsx|tsx|vue)$/, "screen"],
+  [/\.(js|ts|mjs|cjs|py)$/, "logic"],
+];
+function place(path) { // where in the project, in words
+  const segs = path.split("/").slice(0, -1);
+  const cp = segs.indexOf("(control-panel)"), pub = segs.indexOf("(public)"), svc = segs.findIndex((s) => /^services?$/.test(s));
+  if (cp >= 0) { const sec = segs[cp + 1] === "apps" ? segs[cp + 2] : segs[cp + 1]; return sec ? `the ${human(sec)} section of the control panel` : "the control panel"; }
+  if (pub >= 0) { const sec = segs[pub + 1]; return sec ? `the ${human(sec)} section of the public website` : "the public website"; }
+  if (svc >= 0 && segs[svc + 1]) { const n = human(segs[svc + 1]); return `the ${n}${/service/.test(n) ? "" : " service"}`; }
+  const d = segs.filter((s) => !STRUCT_DIR.test(s) && !s.startsWith(".")).pop();
+  return d ? `the ${human(d)} area` : "";
+}
+function describe(path) { // e.g. "the contract invoice screen in the order process section of the control panel"
+  const segs = path.split("/"), file = segs[segs.length - 1];
+  let base = file.replace(/\.(test|spec)(?=\.[^.]+$)/, "").replace(/\.[^.]+$/, "").replace(/\.(routes?|controller|model|schema|service|middleware|config)$/i, "");
+  if (GENERIC_FILE.has(base.toLowerCase()) || /^\[.*\]$/.test(base)) base = segs[segs.length - 2] || base;
+  const kind = (KINDS.find(([re]) => re.test(path)) || [null, "file"])[1];
+  let name = human(base)
+    .replace(/ (route|routes|router|api|service|controller|model|schema|util|utils|helper|helpers|config|configuration|component|logic|tests?)$/i, "")
+    .replace(/^(test|tests) /i, "") || human(base);
+  if (kind === "screen") name = name.replace(/ (page|view|screen)$/, "");
+  if (kind === "automated test set") name = `automated test set for ${name}`;
+  else if (kind === "translation set") name = `${name} translation set`;
+  else if (!name.split(" ").includes(kind.split(" ").pop())) name = `${name} ${kind}`;
+  let where = place(path);
+  const dup = `the ${human(base)} section of `;
+  if (where.startsWith(dup)) where = where.slice(dup.length);
+  if (where === `the ${human(base)} area`) where = "";
+  return where ? `the ${name} in ${where}` : `the ${name}`;
+}
+const RVERB = { GET: "fetching", POST: "creating or sending", PUT: "updating", PATCH: "updating", DELETE: "deleting" };
+const routeHuman = (r) => { const [m, p] = r.split(" "); const noun = p.split("/").filter((s) => s && !s.startsWith(":") && !/^(api|v\d+)$/i.test(s) && !/^\{.*\}$/.test(s)).map(human).join(" "); return `${RVERB[m] || "handling"} ${noun || "the main data"}`; };
+const importHuman = (spec) => {
+  if (/^(\.|@\/|~\/|\/|src\/)/.test(spec)) { const s = spec.split("/").filter((x) => x && x !== "." && x !== ".."); let b = s.pop() || spec; if (GENERIC_FILE.has(b.toLowerCase())) b = s.pop() || b; return `the ${human(b.replace(/\.[^.]+$/, ""))} part of the code`; }
+  return `the ${human(spec.replace(/^node:/, ""))} library`;
+};
+const envHuman = (e) => words(e).join(" ");
+const isTest = (p) => /(^|\/)(__tests__|tests?|e2e)\/|\.(test|spec)\./.test(p);
+const FILETYPE = [
+  [/^\.aaziko-flow\/|(^|\/)aaziko-changelog\.yml$/, "automatic change documentation"],
+  [/\.(css|scss|sass|less)$/i, "styling"], [/(^|\/)(i18n|locales?)\/|\.po$/, "translation"], [/\.(png|jpe?g|gif|svg|webp|ico|avif|bmp)$/i, "image"],
+  [/\.(woff2?|ttf|otf|eot)$/i, "font"], [/\.(md|txt|rst)$/i, "written documentation"],
+  [/(^|\/)(Dockerfile[^/]*|docker-compose[^/]*\.ya?ml|\.env[^/]*|nginx[^/]*\.conf|Jenkinsfile|\.github\/.*|\.gitlab-ci\.yml)$/, "build and deployment setting"],
+  [/(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/, "dependency lock"], [/\.(json|ya?ml|toml|ini|xml|properties|gradle)$/i, "settings and data"],
+  [/\.html?$/i, "page template"], [/\.sql$/i, "database script"], [/\.(sh|bash|ps1|bat)$/i, "script"],
+  [/\.(mp4|mp3|wav|webm|pdf|docx?|xlsx?|pptx?|zip)$/i, "media and document"],
+];
+
+// ---- per-file sentences -------------------------------------------------------
+const isDocSystem = (p) => /^\.aaziko-flow\/|(^|\/)aaziko-changelog\.yml$/.test(p); // this documentation system's own files
+const isCode = (f) => !isDocSystem(f.path) && (CODE_EXT.test(f.path) || /(^|\/)package\.json$/.test(f.path));
 const ordered = [...files].sort((a, b) => (isCode(b) - isCode(a)) || ((b.add || 0) + (b.del || 0)) - ((a.add || 0) + (a.del || 0)));
-const detailed = new Set(ordered.filter(isCode).map((f) => f.path)); // every code file gets a full section
+const detailed = new Set(ordered.filter(isCode).map((f) => f.path)); // every code file gets its own sentence
 
 const impact = [];
-const sections = { new: [], modified: [], removed: [] };
-const others = { new: [], modified: [], removed: [] };
+const said = { new: [], modified: [], removed: [] };
+const otherGroups = { new: {}, modified: {}, removed: {} }; // type -> { count, places }
 
-// analyse all detailed code files first, so code MOVED between files is not reported as removed
+// analyse all code files first, so code MOVED between files is not reported as removed
 const results = new Map();
 for (const f of ordered) if (detailed.has(f.path) && !f.path.endsWith("package.json")) results.set(f.path, analyze(f));
-const addedWhere = new Map(); // name -> file that now defines it
+const addedWhere = new Map();
 for (const [p, a] of results) for (const n of a.addedDecl) if (!addedWhere.has(n)) addedWhere.set(n, p);
 for (const [p, a] of results) {
   a.movedTo = a.removedDecl.filter((n) => addedWhere.has(n) && addedWhere.get(n) !== p).map((n) => [n, addedWhere.get(n)]);
@@ -192,101 +283,99 @@ for (const [p, a] of results) {
   a.removedExported = a.removedExported.filter((n) => !moved.has(n));
 }
 for (const [p, a] of results) {
-  const movedIn = [...results].flatMap(([q, b]) => (q === p ? [] : b.movedTo.filter(([, to]) => to === p).map(([n]) => n)));
-  a.movedIn = new Set(movedIn);
+  a.movedIn = new Set([...results].flatMap(([q, b]) => (q === p ? [] : b.movedTo.filter(([, to]) => to === p).map(([n]) => n))));
   a.addedDecl = a.addedDecl.filter((n) => !a.movedIn.has(n));
 }
 
+let packagesChanged = false;
 for (const f of ordered) {
-  if (!detailed.has(f.path)) { others[f.status].push(`- ${code(f.path)} — ${lineInfo(f)}`); continue; }
-  const out = [`#### ${code(f.path)}`, "", `*${f.status === "new" ? "New file" : f.status === "removed" ? "Removed file" : "Existing file, modified"} — ${lineInfo(f)}*`, ""];
-
-  if (f.path.endsWith("package.json")) {
-    const pk = packageDiff(f.path);
-    out.push(...(pk.length ? pk.map((x) => `- ${x[0].toUpperCase()}${x.slice(1)}`) : ["- Package metadata changed (no dependency changes)."]));
-    if (pk.some((x) => /package/.test(x))) impact.push(`Dependencies changed in ${code(f.path)} — run \`npm install\` and rebuild the Docker image before deploying.`);
-    sections[f.status].push(out.join("\n"));
+  if (!detailed.has(f.path)) {
+    const t = (FILETYPE.find(([re]) => re.test(f.path)) || [null, "other"])[1];
+    const g = (otherGroups[f.status][t] ||= { count: 0, places: new Set() });
+    g.count++; const w = place(f.path); if (w) g.places.add(w);
     continue;
   }
-
-  const a = results.get(f.path);
-  const bullets = [];
+  if (f.path.endsWith("package.json")) {
+    const pk = packageDiff(f.path);
+    if (pk.length) { said[f.status].push(...pk); packagesChanged = true; }
+    else said[f.status].push(`The project description${place(f.path) ? ` of ${place(f.path)}` : ""} was updated, without any change to its external libraries.`);
+    continue;
+  }
+  const a = results.get(f.path), d = describe(f.path), bits = [];
   const movedGroups = {};
   for (const [n, to] of a.movedTo) (movedGroups[to] ||= []).push(n);
   if (f.status === "new") {
-    if (a.addedDecl.length) bullets.push(`Defines: ${list(a.addedDecl)}.`);
-    if (a.movedIn.size) bullets.push(`Code moved here from other files: ${list([...a.movedIn])}.`);
-    if (a.routesAdded.length) bullets.push(`Adds API endpoints: ${list(a.routesAdded)}.`);
-    if (a.importsAdded.length) bullets.push(`Uses: ${list(a.importsAdded)}.`);
-    if (!bullets.length) bullets.push("Data / content file (no functions or components).");
+    if (a.addedDecl.length) bits.push(`it provides ${joinNat(a.addedDecl.map(human))}`);
+    if (a.movedIn.size) bits.push(`it takes over ${joinNat([...a.movedIn].map(human))} from other parts of the code`);
+    if (a.routesAdded.length) bits.push(`it offers new services for ${joinNat(a.routesAdded.map(routeHuman))}`);
+    if (a.envAdded.length) bits.push(`it uses the ${joinNat(a.envAdded.map(envHuman))} ${pl(a.envAdded.length, "setting", "settings")}`);
+    said.new.push(`A new ${d.replace(/^the /, "")} was added${bits.length ? `; ${bits.join("; ")}` : ""}.`);
   } else if (f.status === "removed") {
-    if (a.removedDecl.length) bullets.push(`It defined: ${list(a.removedDecl)}.`);
-    if (a.routesRemoved.length) bullets.push(`Its API endpoints are gone: ${list(a.routesRemoved)}.`);
+    if (a.removedDecl.length) bits.push(`it provided ${joinNat(a.removedDecl.map(human))}`);
+    if (a.routesRemoved.length) bits.push(`it offered services for ${joinNat(a.routesRemoved.map(routeHuman))}`);
+    said.removed.push(`${cap(d)} was removed${bits.length ? `; ${bits.join("; ")}` : ""}.`);
   } else {
-    if (a.addedDecl.length) bullets.push(`Added: ${list(a.addedDecl)}.`);
-    if (a.movedIn.size) bullets.push(`Code moved here from other files: ${list([...a.movedIn])}.`);
-    if (a.removedDecl.length) bullets.push(`Removed: ${list(a.removedDecl)}.`);
-    for (const [to, names] of Object.entries(movedGroups)) bullets.push(`Moved ${list(names)} to ${code(to)}.`);
-    if (a.touched.length) bullets.push(`Changed the code inside: ${list(a.touched)}.`);
-    if (a.routesAdded.length) bullets.push(`New API endpoints: ${list(a.routesAdded)}.`);
-    if (a.routesRemoved.length) bullets.push(`Removed API endpoints: ${list(a.routesRemoved)}.`);
-    if (a.importsAdded.length) bullets.push(`Now also uses: ${list(a.importsAdded)}.`);
-    if (a.importsRemoved.length) bullets.push(`No longer uses: ${list(a.importsRemoved)}.`);
-    if (!bullets.length) bullets.push("Small edits to existing lines (no functions, routes or imports added or removed).");
+    if (a.addedDecl.length) bits.push(`it now includes ${joinNat(a.addedDecl.map(human))}`);
+    if (a.movedIn.size) bits.push(`it took over ${joinNat([...a.movedIn].map(human))} from other parts of the code`);
+    if (a.removedDecl.length) bits.push(`${joinNat(a.removedDecl.map(human))} ${pl(a.removedDecl.length, "was", "were")} taken out`);
+    for (const [to, names] of Object.entries(movedGroups)) bits.push(`${joinNat(names.map(human))} ${pl(names.length, "was", "were")} moved to ${describe(to)}`);
+    if (a.touched.length) bits.push(`the logic for ${joinNat(a.touched.map(human))} was updated`);
+    if (a.routesAdded.length) bits.push(`it now offers services for ${joinNat(a.routesAdded.map(routeHuman))}`);
+    if (a.routesRemoved.length) bits.push(`it no longer offers services for ${joinNat(a.routesRemoved.map(routeHuman))}`);
+    if (a.importsAdded.length) bits.push(`it now also relies on ${joinNat(a.importsAdded.map(importHuman))}`);
+    if (a.importsRemoved.length) bits.push(`it no longer relies on ${joinNat(a.importsRemoved.map(importHuman))}`);
+    if (a.envAdded.length) bits.push(`it now uses the ${joinNat(a.envAdded.map(envHuman))} ${pl(a.envAdded.length, "setting", "settings")}`);
+    if (!bits.length) bits.push("small adjustments were made to its existing lines");
+    said.modified.push(`${cap(d)} was changed: ${bits.join("; ")}.`);
   }
-  if (a.envAdded.length) bullets.push(`Reads environment variables: ${list(a.envAdded)}.`);
-  out.push(...bullets.map((b) => `- ${b}`));
-  sections[f.status].push(out.join("\n"));
 
-  // ---- impact
-  if (f.status !== "new" && CODE_EXT.test(f.path) && !/(^|\/)(__tests__|tests?)\/|\.(test|spec)\./.test(f.path)) {
+  // ---- impact, in sentences
+  if (f.status !== "new" && CODE_EXT.test(f.path) && !isTest(f.path)) {
     const deps = importers(f.path);
-    if (f.status === "removed" && deps.length) impact.push(`⚠ ${code(f.path)} was removed but is still imported by ${list(deps)} — those files will break.`);
-    else if (deps.length) impact.push(`${code(f.path)} is used by ${deps.length} other file(s): ${list(deps)} — check that they still work.`);
-    // removed exported code that another file still imports from THIS file
+    const users = joinNat(deps.map(describe));
+    if (f.status === "removed" && deps.length) impact.push(`Warning: ${d} was removed, but ${users} still ${pl(deps.length, "uses", "use")} it, so ${pl(deps.length, "it", "they")} will stop working.`);
+    else if (deps.length) impact.push(`Because ${d} changed, ${users} ${pl(deps.length, "depends", "depend")} on it and should be checked.`);
     if (deps.length && f.status === "modified") for (const n of a.removedExported) {
-      const users = new Set(usersOf(n, f.path));
-      const broken = deps.filter((d) => users.has(d));
-      if (broken.length) impact.push(`⚠ ${code(n)} was removed from ${code(f.path)} but ${list(broken)} still import(s) it from there — they may break.`);
+      const u = new Set(usersOf(n, f.path)), broken = deps.filter((x) => u.has(x));
+      if (broken.length) impact.push(`Warning: ${human(n)} was taken out of ${d}, but ${joinNat(broken.map(describe))} still ${pl(broken.length, "uses", "use")} it.`);
     }
   }
-  for (const r of a.routesRemoved) impact.push(`⚠ API endpoint ${code(r)} was removed — any page or app calling it will now get an error.`);
-  for (const r of a.routesAdded) impact.push(`New API endpoint ${code(r)} is available.`);
-  for (const e of a.envAdded) impact.push(`Code now reads ${code(e)} — make sure it is set in the \`.env\` / deployment.`);
+  for (const r of a.routesRemoved) impact.push(`Warning: the service for ${routeHuman(r)} was removed, so any screen or app that calls it will now get an error.`);
+  for (const r of a.routesAdded) impact.push(`A new service for ${routeHuman(r)} is now available.`);
+  for (const e of a.envAdded) impact.push(`Before deploying, the ${envHuman(e)} setting must be configured on the server.`);
 }
+for (const status of ["new", "modified", "removed"]) {
+  const verb = { new: "added", modified: "updated", removed: "removed" }[status];
+  for (const [t, g] of Object.entries(otherGroups[status])) {
+    const what = t === "other" ? pl(g.count, "other file", "other files") : `${t} ${pl(g.count, "file", "files")}`;
+    said[status].push(`${cap(`${g.count} ${what}`)} ${pl(g.count, "was", "were")} ${verb}${g.places.size ? ` in ${joinNat([...g.places])}` : ""}.`);
+  }
+}
+if (packagesChanged) impact.push("External libraries changed, so they must be installed again and the application rebuilt before deploying.");
+if (files.some((f) => CONFIG_FILE.test(f.path) && !isDocSystem(f.path))) impact.push("Build or deployment settings changed, so the build and the deployment should be checked.");
+const testCount = files.filter((f) => isTest(f.path)).length;
+if (testCount) impact.push(`${testCount} automated test ${pl(testCount, "file was", "files were")} added or changed, so the tests should be run.`);
 
-for (const f of files) if (CONFIG_FILE.test(f.path)) impact.push(`Build/deploy configuration changed: ${code(f.path)} — re-check the build and deployment.`);
-const testFiles = files.filter((f) => /(^|\/)(__tests__|tests?)\/|\.(test|spec)\./.test(f.path));
-if (testFiles.length) impact.push(`${testFiles.length} test file(s) were added or changed — run the tests.`);
-
-// ---- overview ------------------------------------------------------------------
+// ---- summary --------------------------------------------------------------------
 const count = (s) => files.filter((f) => f.status === s).length;
 const totalAdd = files.reduce((s, f) => s + (f.add || 0), 0), totalDel = files.reduce((s, f) => s + (f.del || 0), 0);
 const areas = {};
-for (const f of files) { const d = f.path.includes("/") ? f.path.split("/").slice(0, -1).slice(0, 3).join("/") : "(project root)"; areas[d] = (areas[d] || 0) + 1; }
-const topAreas = Object.entries(areas).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([d, n]) => `${code(d)} (${n})`);
+for (const f of files) { const w = place(f.path) || "the main project folder"; areas[w] = (areas[w] || 0) + 1; }
+const topAreas = Object.entries(areas).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([w]) => w);
+const summary =
+`${HISTORY ? `On ${fmtDate(dateOnly)}, the ${branch} branch received changes to` : `On ${fmtDate(dateOnly)} at ${timeOnly}, a push to the ${branch} branch changed`} ${files.length} ${pl(files.length, "file", "files")}: ${count("new")} added, ${count("modified")} changed and ${count("removed")} removed, with ${totalAdd} lines added and ${totalDel} lines removed in total. Most of the work was in ${joinNat(topAreas)}.`;
 
-const overview =
-`${HISTORY ? `On this day, branch ${code(branch)} received changes to` : `This push to branch ${code(branch)} changed`} **${files.length} file(s)**: ${count("new")} new, ${count("modified")} modified, ${count("removed")} removed (+${totalAdd} / −${totalDel} lines).
-
-Main areas touched: ${topAreas.join(", ")}.`;
-
-const part = (title, key, otherTitle) => {
-  const body = [...sections[key]];
-  if (others[key].length) body.push(`**${otherTitle}**\n\n${others[key].join("\n")}`);
-  return body.length ? `### ${title}\n\n${body.join("\n\n")}\n\n` : "";
-};
-
+const part = (title, list) => (list.length ? `### ${title}\n\n${list.map((s) => `- ${s}`).join("\n")}\n\n` : "");
 const entry =
-`## ${HISTORY ? `${dateOnly} — branch \`${branch}\` (history)` : `${dateOnly} ${timeOnly} — branch \`${branch}\``}
+`## ${fmtDate(dateOnly)}${HISTORY ? "" : `, ${timeOnly}`} — ${branch} branch${HISTORY ? " (history)" : ""}
 
-### Overview
+### Summary
 
-${overview}
+${summary}
 
-${part("New files", "new", "Other new files")}${part("Changes to existing files", "modified", "Other modified files")}${part("Removed files", "removed", "Other removed files")}### Impact
+${part("What was added", said.new)}${part("What was changed", said.modified)}${part("What was removed", said.removed)}### Impact
 
-${(impact.length ? [...new Set(impact)] : ["No other files depend on the changed code — the impact stays inside the files listed above."]).map((x) => `- ${x}`).join("\n")}
+${(impact.length ? [...new Set(impact)] : ["These changes are self-contained; no other part of the project depends on them."]).map((x) => `- ${x}`).join("\n")}
 
 ---
 `;
