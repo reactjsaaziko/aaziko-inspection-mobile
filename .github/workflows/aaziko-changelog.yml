@@ -69,9 +69,15 @@ jobs:
         env:
           AFTER_SHA: ${{ github.event.after }}
         run: |
-          # use the generator from the pushed commit if it has one, else the default branch's
-          git show "$AFTER_SHA:.aaziko-flow/changelog.mjs" > /tmp/changelog.mjs 2>/dev/null \
-            || cp .aaziko-flow/changelog.mjs /tmp/changelog.mjs
+          # The generator lives on the changelog branch, so improving it never
+          # touches code branches. Fallbacks: the pushed commit, then the default branch.
+          if git show "origin/${DOC_BRANCH}:.aaziko-flow/changelog.mjs" > /tmp/changelog.mjs 2>/dev/null; then
+            echo "generator: ${DOC_BRANCH} branch"
+          elif git show "$AFTER_SHA:.aaziko-flow/changelog.mjs" > /tmp/changelog.mjs 2>/dev/null; then
+            echo "generator: pushed commit"
+          else
+            cp .aaziko-flow/changelog.mjs /tmp/changelog.mjs && echo "generator: default branch"
+          fi
 
       - name: Switch to the changelog branch
         run: |
